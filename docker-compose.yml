@@ -1,0 +1,258 @@
+version: '3.8'
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Freedom Hub Node - Docker Compose for Federation
+# ─────────────────────────────────────────────────────────────────────────────
+# 
+# Quick Start:
+#   1. cp .env.example .env
+#   2. Edit .env with your settings
+#   3. docker-compose up -d
+#   4. Open https://your-domain.com/admin
+#
+# Federation: 2% protocol fee automatically sent to super admin
+# ─────────────────────────────────────────────────────────────────────────────
+
+services:
+  # ───────────────────────────────────────────────────────────────────────────
+  # Main Application
+  # ───────────────────────────────────────────────────────────────────────────
+  app:
+    image: freedomhub/node:latest
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: freedom-node-app
+    restart: unless-stopped
+    environment:
+      - NODE_ID=${NODE_ID:-auto}
+      - NODE_NAME=${NODE_NAME:-My Freedom Node}
+      - NODE_DOMAIN=${NODE_DOMAIN}
+      - NODE_ADMIN_EMAIL=${NODE_ADMIN_EMAIL}
+      
+      # Protocol Settings (2% commission)
+      - PROTOCOL_WALLET=${PROTOCOL_WALLET}
+      - PROTOCOL_FEE_PERCENT=2
+      - PROTOCOL_AUTO_SEND=true
+      - PROTOCOL_SEND_INTERVAL=86400
+      
+      # Database
+      - DATABASE_URL=postgresql://${DB_USER}:${DB_PASSWORD}@db:5432/${DB_NAME}
+      
+      # Redis
+      - REDIS_URL=redis://redis:6379
+      
+      # Storage
+      - IPFS_URL=http://ipfs:5001
+      - STORAGE_PATH=/var/lib/freedom-node/storage
+      
+      # API Keys
+      - OPENAI_API_KEY=${OPENAI_API_KEY}
+      - ANTHROPIC_API_KEY=${ANTHROPIC_API_KEY}
+      - ELEVENLABS_API_KEY=${ELEVENLABS_API_KEY}
+      
+      # Payments
+      - STRIPE_SECRET_KEY=${STRIPE_SECRET_KEY}
+      - CRYPTO_WALLET_ADDRESS=${CRYPTO_WALLET_ADDRESS}
+      
+      # Security
+      - JWT_SECRET=${JWT_SECRET}
+      - SESSION_SECRET=${SESSION_SECRET}
+      - ENCRYPTION_KEY=${ENCRYPTION_KEY}
+      
+      # Federation
+      - FEDERATION_ENABLED=true
+      - FEDERATION_MODE=${FEDERATION_MODE:-full}
+      
+      # Monitoring
+      - ENABLE_ANALYTICS=true
+      - TELEMETRY_ENABLED=true
+    ports:
+      - "${APP_PORT:-3000}:3000"
+    volumes:
+      - app_storage:/var/lib/freedom-node/storage
+      - app_logs:/var/log/freedom-node
+    depends_on:
+      db:
+        condition: service_healthy
+      redis:
+        condition: service_started
+      ipfs:
+        condition: service_started
+    networks:
+      - freedom-network
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:3000/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 40s
+
+  # ───────────────────────────────────────────────────────────────────────────
+  # PostgreSQL Database
+  # ───────────────────────────────────────────────────────────────────────────
+  db:
+    image: postgres:15-alpine
+    container_name: freedom-node-db
+    restart: unless-stopped
+    environment:
+      - POSTGRES_USER=${DB_USER:-freedom}
+      - POSTGRES_PASSWORD=${DB_PASSWORD}
+      - POSTGRES_DB=${DB_NAME:-freedom_hub}
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+      - ./backups/db:/backups
+    ports:
+      - "${DB_PORT:-5432}:5432"
+    networks:
+      - freedom-network
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${DB_USER:-freedom}"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  # ───────────────────────────────────────────────────────────────────────────
+  # Redis (Cache & Queues)
+  # ───────────────────────────────────────────────────────────────────────────
+  redis:
+    image: redis:7-alpine
+    container_name: freedom-node-redis
+    restart: unless-stopped
+    command: redis-server --appendonly yes --requirepass ${REDIS_PASSWORD:-redis}
+    volumes:
+      - redis_data:/data
+    ports:
+      - "${REDIS_PORT:-6379}:6379"
+    networks:
+      - freedom-network
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  # ───────────────────────────────────────────────────────────────────────────
+  # IPFS (Decentralized Storage)
+  # ───────────────────────────────────────────────────────────────────────────
+  ipfs:
+    image: ipfs/go-ipfs:latest
+    container_name: freedom-node-ipfs
+    restart: unless-stopped
+    environment:
+      - IPFS_PROFILE=server
+    volumes:
+      - ipfs_data:/data/ipfs
+    ports:
+      - "${IPFS_API_PORT:-5001}:5001"
+      - "${IPFS_GATEWAY_PORT:-8080}:8080"
+    networks:
+      - freedom-network
+
+  # ───────────────────────────────────────────────────────────────────────────
+  # Nginx (Reverse Proxy)
+  # ───────────────────────────────────────────────────────────────────────────
+  nginx:
+    image: nginx:alpine
+    container_name: freedom-node-nginx
+    restart: unless-stopped
+    ports:
+      - "80:80"
+      - "443:443"
+    volumes:
+      - ./nginx/nginx.conf:/etc/nginx/nginx.conf:ro
+      - ./nginx/ssl:/etc/nginx/ssl:ro
+      - ./nginx/logs:/var/log/nginx
+    depends_on:
+      - app
+    networks:
+      - freedom-network
+
+  # ───────────────────────────────────────────────────────────────────────────
+  # Watchtower (Auto Updates)
+  # ───────────────────────────────────────────────────────────────────────────
+  watchtower:
+    image: containrrr/watchtower:latest
+    container_name: freedom-node-watchtower
+    restart: unless-stopped
+    environment:
+      - WATCHTOWER_POLL_INTERVAL=86400
+      - WATCHTOWER_CLEANUP=true
+      - WATCHTOWER_NOTIFICATIONS=shoutrrr
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock
+    networks:
+      - freedom-network
+    profiles:
+      - auto-update
+
+  # ───────────────────────────────────────────────────────────────────────────
+  # Prometheus (Monitoring)
+  # ───────────────────────────────────────────────────────────────────────────
+  prometheus:
+    image: prom/prometheus:latest
+    container_name: freedom-node-prometheus
+    restart: unless-stopped
+    volumes:
+      - ./monitoring/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+      - prometheus_data:/prometheus
+    command:
+      - '--config.file=/etc/prometheus/prometheus.yml'
+      - '--storage.tsdb.path=/prometheus'
+    ports:
+      - "${PROMETHEUS_PORT:-9090}:9090"
+    networks:
+      - freedom-network
+    profiles:
+      - monitoring
+
+  # ───────────────────────────────────────────────────────────────────────────
+  # Grafana (Monitoring Dashboard)
+  # ───────────────────────────────────────────────────────────────────────────
+  grafana:
+    image: grafana/grafana:latest
+    container_name: freedom-node-grafana
+    restart: unless-stopped
+    environment:
+      - GF_SECURITY_ADMIN_PASSWORD=${GRAFANA_PASSWORD:-admin}
+    volumes:
+      - grafana_data:/var/lib/grafana
+      - ./monitoring/grafana/dashboards:/etc/grafana/provisioning/dashboards
+      - ./monitoring/grafana/datasources:/etc/grafana/provisioning/datasources
+    ports:
+      - "${GRAFANA_PORT:-3001}:3000"
+    depends_on:
+      - prometheus
+    networks:
+      - freedom-network
+    profiles:
+      - monitoring
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Volumes
+# ─────────────────────────────────────────────────────────────────────────────
+volumes:
+  postgres_data:
+    driver: local
+  redis_data:
+    driver: local
+  ipfs_data:
+    driver: local
+  app_storage:
+    driver: local
+  app_logs:
+    driver: local
+  prometheus_data:
+    driver: local
+  grafana_data:
+    driver: local
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Networks
+# ─────────────────────────────────────────────────────────────────────────────
+networks:
+  freedom-network:
+    driver: bridge
+    ipam:
+      config:
+        - subnet: 172.28.0.0/16

@@ -1,0 +1,126 @@
+name: 🤖 Android Build
+
+on:
+  push:
+    branches:
+      - main
+  pull_request:
+    branches:
+      - main
+  workflow_dispatch:
+
+env:
+  NODE_VERSION: '20'
+  JAVA_VERSION: '17'
+
+jobs:
+  build-android:
+    name: 📱 Build Android APK
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+
+    steps:
+      - name: 📥 Checkout repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: 🟢 Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: 'npm'
+
+      - name: ☕ Setup Java JDK
+        uses: actions/setup-java@v4
+        with:
+          distribution: 'temurin'
+          java-version: ${{ env.JAVA_VERSION }}
+          cache: 'gradle'
+
+      - name: 📦 Install dependencies
+        run: |
+          npm ci
+          echo "✅ Dependencies installed"
+
+      - name: 🔨 Build web app
+        run: |
+          npm run build
+          echo "✅ Web build completed"
+
+      - name: 📋 Check Capacitor config
+        run: |
+          npx cap doctor || true
+          echo "✅ Capacitor check completed"
+
+      - name: 📱 Add Android platform
+        run: |
+          if [ ! -d "android" ]; then
+            npx cap add android
+            echo "✅ Android platform added"
+          else
+            echo "ℹ️ Android platform already exists"
+          fi
+
+      - name: 🔄 Sync Capacitor
+        run: |
+          npx cap sync android
+          echo "✅ Capacitor synced"
+
+      - name: 🔧 Setup Gradle
+        uses: gradle/gradle-build-action@v3
+        with:
+          gradle-version: wrapper
+
+      - name: 📦 Gradle warmup
+        run: |
+          cd android
+          chmod +x ./gradlew
+          ./gradlew --version
+
+      - name: 🏗️ Build Debug APK
+        run: |
+          cd android
+          ./gradlew assembleDebug --stacktrace
+          echo "✅ Debug APK built"
+
+      - name: 📦 Find and rename APK
+        id: find_apk
+        run: |
+          APK_PATH=$(find android/app/build/outputs/apk/debug -name "*.apk" -type f | head -n 1)
+          
+          if [ -z "$APK_PATH" ]; then
+            echo "❌ APK not found!"
+            exit 1
+          fi
+          
+          VERSION=$(node -p "require('./package.json').version")
+          BUILD_NUMBER=${{ github.run_number }}
+          BUILD_DATE=$(date +%Y%m%d_%H%M%S)
+          NEW_NAME="FreedomHub_v${VERSION}_build${BUILD_NUMBER}_${BUILD_DATE}.apk"
+          
+          cp "$APK_PATH" "$NEW_NAME"
+          
+          echo "apk_path=$NEW_NAME" >> $GITHUB_OUTPUT
+          echo "apk_name=$NEW_NAME" >> $GITHUB_OUTPUT
+          echo "✅ APK ready: $NEW_NAME"
+
+      - name: 📤 Upload APK artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: freedom-hub-android-apk
+          path: ${{ steps.find_apk.outputs.apk_path }}
+          retention-days: 30
+          if-no-files-found: error
+
+      - name: 📊 Build Summary
+        run: |
+          echo "=========================================="
+          echo "✅ ANDROID BUILD COMPLETED"
+          echo "=========================================="
+          echo "📱 APK: ${{ steps.find_apk.outputs.apk_name }}"
+          echo "🔢 Build: ${{ github.run_number }}"
+          echo "🔗 Commit: ${{ github.sha }}"
+          echo ""
+          echo "📥 Download from: https://github.com/${{ github.repository }}/actions/runs/${{ github.run_id }}"
+          echo "=========================================="
